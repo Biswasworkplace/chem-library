@@ -1,278 +1,331 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
-import { FOLDER_TREE } from '../lib/folders'
 import UploadModal from './UploadModal'
 import FileList from './FileList'
 
-const SUBJECT_COLORS = {
-  organic: '#e8f5e9', medicinal: '#e3f2fd', spectroscopy: '#f3e5f5',
-  analytic: '#fff8e1', physical: '#fce4ec', biochem: '#e0f7fa'
+const COLORS = ['#dbeafe', '#dcfce7', '#fce7f3', '#fef3c7', '#ede9fe', '#fde68a', '#d1fae5']
+
+function getColor(name) {
+  if (!name) return '#f8fafc'
+  const idx = name.charCodeAt(0) % COLORS.length
+  return COLORS[idx]
 }
 
-function getSubjectColor(id) {
-  const subject = Object.keys(SUBJECT_COLORS).find(k => id === k || id.startsWith(k.slice(0, 3)))
-  return subject ? SUBJECT_COLORS[subject] : '#f3f4f6'
+function getFolderIcon(name) {
+  if (!name) return '??'
+  const label = name.toLowerCase()
+  if (label.includes('doc') || label.includes('report')) return '??'
+  if (label.includes('img') || label.includes('photo') || label.includes('jpeg') || label.includes('png')) return '???'
+  if (label.includes('slide') || label.includes('presentation')) return '??'
+  return '??'
 }
 
 export default function FileManager({ user }) {
-  const [currentId, setCurrentId] = useState('root')
+  const [currentFolderId, setCurrentFolderId] = useState(null)
+  const [currentFolder, setCurrentFolder] = useState({ id: null, name: 'Home', parent_id: null })
+  const [breadcrumbs, setBreadcrumbs] = useState([{ id: null, name: 'Home' }])
   const [history, setHistory] = useState([])
+  const [childFolders, setChildFolders] = useState([])
   const [files, setFiles] = useState([])
-  const [loadingFiles, setLoadingFiles] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [showUpload, setShowUpload] = useState(false)
-  const [search, setSearch] = useState('')
+  const [folderSearch, setFolderSearch] = useState('')
+  const [confirmDeleteFolder, setConfirmDeleteFolder] = useState(null)
+  const [errorMessage, setErrorMessage] = useState('')
 
-  const currentNode = FOLDER_TREE[currentId]
-  const isLeaf = currentNode && !currentNode.children && !currentNode.sections
+  const loadCurrentFolder = useCallback(async () => {
+    setLoading(true)
+    setErrorMessage('')
 
-  const loadFiles = useCallback(async () => {
-    if (!isLeaf) return
-    setLoadingFiles(true)
-    const { data } = await supabase
-      .from('files')
-      .select('*')
-      .eq('user_id', user.id)
-      .eq('folder_id', currentId)
-      .order('created_at', { ascending: false })
-    setFiles(data || [])
-    setLoadingFiles(false)
-  }, [currentId, isLeaf, user.id])
+    const childrenQuery = supabase.from('folders').select('id,name,parent_id,created_at').eq('user_id', user.id)
+    const filesQuery = supabase.from('files').select('*').eq('user_id', user.id)
 
-  useEffect(() => { loadFiles() }, [loadFiles])
+    if (currentFolderId === null) {
+      childrenQuery.is('parent_id', null)
+      filesQuery.is('folder_id', null)
+    } else {
+      childrenQuery.eq('parent_id', currentFolderId)
+      filesQuery.eq('folder_id', currentFolderId)
+    }
 
-  const navigate = (id) => {
-    setHistory(h => [...h, currentId])
-    setCurrentId(id)
-    setSearch('')
+    const [folderResponse, childResponse, filesResponse] = await Promise.all([
+      currentFolderId === null
+        ? Promise.resolve({ data: null, error: null })
+        : supabase.from('folders').select('id,name,parent_id').eq('user_id', user.id).eq('id', currentFolderId).single(),
+      childrenQuery.order('created_at', { ascending: false }),
+      filesQuery.order('created_at', { ascending: false })
+    ])
+
+    const folderData = folderResponse.data
+    setCurrentFolder(
+      folderData ? { id: folderData.id, name: folderData.name, parent_id: folderData.parent_id } : { id: null, name: 'Home', parent_id: null }
+    )
+    setChildFolders(childResponse.data || [])
+    setFiles(filesResponse.data || [])
+
+    if (currentFolderId) {
+      const trail = [{ id: null, name: 'Home' }]
+      let nextId = currentFolderId
+      while (nextId) {
+        const { data, error } = await supabase
+          .from('folders')
+          .select('id,name,parent_id')
+          .eq('user_id', user.id)
+          .eq('id', nextId)
+          .single()
+        if (error || !data) break
+        trail.push({ id: data.id, name: data.name })
+        nextId = data.parent_id
+      }
+      setBreadcrumbs(trail)
+    } else {
+      setBreadcrumbs([{ id: null, name: 'Home' }])
+    }
+
+    setLoading(false)
+  }, [currentFolderId, user.id])
+
+  useEffect(() => { loadCurrentFolder() }, [loadCurrentFolder])
+
+  const navigate = (folder) => {
+    setHistory((prev) => [...prev, currentFolderId])
+    setCurrentFolderId(folder.id)
+    setFolderSearch('')
   }
 
   const goBack = () => {
     if (!history.length) return
-    setCurrentId(history[history.length - 1])
-    setHistory(h => h.slice(0, -1))
-    setSearch('')
+    const previous = history[history.length - 1]
+    setHistory((prev) => prev.slice(0, -1))
+    setCurrentFolderId(previous)
+    setFolderSearch('')
   }
 
-  const jumpTo = (idx) => {
-    const trail = [...history, currentId]
-    setCurrentId(trail[idx])
-    setHistory(trail.slice(0, idx))
-    setSearch('')
+  const jumpTo = (index) => {
+    const next = breadcrumbs[index]
+    if (!next) return
+    setCurrentFolderId(next.id)
+    setHistory(breadcrumbs.slice(0, index).map((item) => item.id))
+    setFolderSearch('')
   }
 
-  const getBreadcrumb = () => {
-    const trail = [...history, currentId]
-    return trail.map(id => {
-      const node = FOLDER_TREE[id]
-      if (id === 'root') return { id, label: 'My Library' }
-      return { id, label: node?.label || id }
+  const createFolder = async () => {
+    const name = window.prompt(`Enter ${currentFolderId === null ? 'topic' : 'folder'} name`)?.trim()
+    if (!name) return
+
+    const { error } = await supabase.from('folders').insert({
+      user_id: user.id,
+      parent_id: currentFolderId,
+      name
     })
+
+    if (error) {
+      setErrorMessage(error.message)
+      return
+    }
+
+    loadCurrentFolder()
   }
 
-  const getChildren = () => {
-    if (!currentNode) return []
-    if (currentNode.children) return currentNode.children
-    if (currentNode.sections) return currentNode.sections.flatMap(s => s.children)
-    return []
+  const collectDescendantFolderIds = async (folderId) => {
+    const ids = [folderId]
+    const stack = [folderId]
+
+    while (stack.length) {
+      const parent = stack.pop()
+      const { data, error } = await supabase.from('folders').select('id').eq('user_id', user.id).eq('parent_id', parent)
+      if (error || !data) continue
+      const children = data.map((item) => item.id)
+      ids.push(...children)
+      stack.push(...children)
+    }
+
+    return ids
   }
 
-  const getSections = () => {
-    if (currentNode?.sections) return currentNode.sections
-    return null
+  const deleteFolderTree = async (folderId) => {
+    const ids = await collectDescendantFolderIds(folderId)
+    const { data: filePaths } = await supabase.from('files').select('storage_path').eq('user_id', user.id).in('folder_id', ids)
+    const paths = filePaths?.map((item) => item.storage_path).filter(Boolean) || []
+
+    if (paths.length) {
+      await supabase.storage.from('files').remove(paths)
+    }
+
+    await supabase.from('files').delete().eq('user_id', user.id).in('folder_id', ids)
+    await supabase.from('folders').delete().eq('user_id', user.id).in('id', ids)
   }
 
-  const signOut = () => supabase.auth.signOut()
+  const confirmDelete = async () => {
+    if (!confirmDeleteFolder) return
+    await deleteFolderTree(confirmDeleteFolder.id)
 
-  const renderFolderGrid = (items) => {
-    const filtered = search
-      ? items.filter(item => item.name.toLowerCase().includes(search.toLowerCase()))
-      : items
+    if (currentFolderId === confirmDeleteFolder.id) {
+      setCurrentFolderId(currentFolder.parent_id)
+      setHistory((prev) => prev.slice(0, -1))
+    }
 
-    return (
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
-        gap: 10
-      }}>
-        {filtered.map(item => (
-          <div key={item.id} onClick={() => navigate(item.id)}
-            style={{
-              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
-              padding: '18px 10px', borderRadius: 12, cursor: 'pointer',
-              background: getSubjectColor(item.id),
-              border: '1px solid rgba(0,0,0,0.06)', transition: 'all .15s',
-              textAlign: 'center'
-            }}
-            onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 4px 14px rgba(0,0,0,0.1)' }}
-            onMouseLeave={e => { e.currentTarget.style.transform = ''; e.currentTarget.style.boxShadow = '' }}
-          >
-            <span style={{ fontSize: 30 }}>{item.icon}</span>
-            <span style={{ fontSize: 12, fontWeight: 500, color: '#374151', lineHeight: 1.4 }}>
-              {item.name}
-            </span>
-          </div>
-        ))}
-        {filtered.length === 0 && (
-          <div style={{ gridColumn: '1/-1', textAlign: 'center', padding: '40px 0', color: '#9ca3af', fontSize: 14 }}>
-            No folders match "{search}"
-          </div>
-        )}
-      </div>
-    )
+    setConfirmDeleteFolder(null)
+    loadCurrentFolder()
   }
 
-  const sections = getSections()
-  const children = getChildren()
+  const currentIsRoot = currentFolderId === null
+  const filteredFolders = childFolders.filter((folder) => folder.name.toLowerCase().includes(folderSearch.toLowerCase()))
 
   return (
-    <div style={{ display: 'flex', height: '100vh', fontFamily: 'system-ui, sans-serif', background: '#f8f9fb' }}>
-
-      {/* Sidebar */}
-      <div style={{
-        width: 220, background: '#1a1a2e', display: 'flex', flexDirection: 'column',
-        flexShrink: 0, overflow: 'hidden'
-      }}>
-        <div style={{ padding: '20px 18px 14px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 22 }}>üß™</span>
-            <span style={{ fontSize: 15, fontWeight: 700, color: '#fff' }}>Chem Library</span>
-          </div>
-          <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', margin: '6px 0 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {user.email}
-          </p>
-        </div>
-
-        <div style={{ padding: '12px 0', flex: 1, overflow: 'auto' }}>
-          <p style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.3)', padding: '0 18px', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.06em' }}>
-            Subjects
-          </p>
-          {FOLDER_TREE.root.children.map(item => (
-            <div key={item.id}
-              onClick={() => navigate(item.id)}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 9,
-                padding: '8px 18px', cursor: 'pointer', fontSize: 13,
-                color: history.includes(item.id) || currentId === item.id ? '#fff' : 'rgba(255,255,255,0.6)',
-                background: currentId === item.id ? 'rgba(74,144,217,0.25)' : 'transparent',
-                borderLeft: currentId === item.id ? '2px solid #4A90D9' : '2px solid transparent',
-                transition: 'all .12s'
-              }}
-              onMouseEnter={e => { if (currentId !== item.id) e.currentTarget.style.background = 'rgba(255,255,255,0.06)' }}
-              onMouseLeave={e => { if (currentId !== item.id) e.currentTarget.style.background = 'transparent' }}
-            >
-              <span style={{ fontSize: 15 }}>{item.icon}</span>
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</span>
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="sidebar-top">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 24 }}>??</span>
+            <div>
+              <p style={{ fontSize: 16, fontWeight: 700, margin: 0, color: '#fff' }}>Chem Cloud</p>
+              <p style={{ fontSize: 11, color: '#cbd5e1', margin: '4px 0 0' }}>{user.email}</p>
             </div>
-          ))}
+          </div>
         </div>
 
-        <div style={{ padding: '14px 18px', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
-          <button onClick={signOut} style={{
-            width: '100%', padding: '8px 0', background: 'rgba(255,255,255,0.07)',
-            border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8,
-            color: 'rgba(255,255,255,0.6)', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit'
-          }}>
+        <div className="sidebar-nav">
+          <div className="sidebar-section-label">Folders</div>
+          <button className="sidebar-button" onClick={() => setCurrentFolderId(null)}>
+            <span>Home</span>
+            <span>??</span>
+          </button>
+          {breadcrumbs.length > 1 && (
+            <div className="sidebar-path">
+              <span>{breadcrumbs.map((crumb) => crumb.name).join(' / ')}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="sidebar-footer">
+          <button className="action-button secondary" onClick={() => supabase.auth.signOut()}>
             Sign out
           </button>
         </div>
-      </div>
+      </aside>
 
-      {/* Main */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        {/* Toolbar */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 10, padding: '12px 20px',
-          background: '#fff', borderBottom: '1px solid #e5e7eb'
-        }}>
-          <button onClick={goBack} disabled={!history.length}
-            style={{
-              padding: '6px 12px', border: '1px solid #e5e7eb', borderRadius: 8,
-              background: 'transparent', cursor: history.length ? 'pointer' : 'not-allowed',
-              opacity: history.length ? 1 : 0.35, fontSize: 13, color: '#374151', fontFamily: 'inherit'
-            }}>
-            ‚Üê Back
-          </button>
+      <main className="main-content">
+        <header className="toolbar">
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', width: '100%' }}>
+            <button className="action-button outline" onClick={goBack} disabled={!history.length}>? Back</button>
+            <div className="breadcrumb-bar">
+              {breadcrumbs.map((crumb, index) => (
+                <span key={`${crumb.id ?? 'root'}-${index}`} className="breadcrumb-item">
+                  <button type="button" onClick={() => jumpTo(index)} className="breadcrumb-link">
+                    {crumb.name}
+                  </button>
+                  {index < breadcrumbs.length - 1 && <span className="breadcrumb-separator">õ</span>}
+                </span>
+              ))}
+            </div>
+          </div>
 
-          {/* Breadcrumb */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flex: 1, overflow: 'hidden', fontSize: 13 }}>
-            {getBreadcrumb().map((crumb, i, arr) => (
-              <span key={crumb.id} style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
-                {i < arr.length - 1 ? (
-                  <>
-                    <span onClick={() => jumpTo(i)} style={{ cursor: 'pointer', color: '#4A90D9', whiteSpace: 'nowrap' }}>
-                      {crumb.label}
-                    </span>
-                    <span style={{ color: '#d1d5db' }}>‚Ä∫</span>
-                  </>
-                ) : (
-                  <span style={{ fontWeight: 600, color: '#1f2937', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {crumb.label}
-                  </span>
-                )}
-              </span>
+          <div className="toolbar-actions">
+            <input
+              type="search"
+              value={folderSearch}
+              onChange={(e) => setFolderSearch(e.target.value)}
+              placeholder="Search folders"
+              className="search-input"
+            />
+            <button className="action-button primary" onClick={createFolder}>
+              + {currentIsRoot ? 'New Topic' : 'New Folder'}
+            </button>
+            <button className="action-button primary" onClick={() => setShowUpload(true)}>
+              Upload File
+            </button>
+            {!currentIsRoot && (
+              <button className="action-button danger" onClick={() => setConfirmDeleteFolder(currentFolder)}>
+                Delete
+              </button>
+            )}
+          </div>
+        </header>
+
+        <section className="content-area">
+          <div className="section-header">
+            <div>
+              <p className="section-label">{currentFolder.name}</p>
+              <p className="section-note">{filteredFolders.length} folder{filteredFolders.length !== 1 ? 's' : ''} ∑ {files.length} file{files.length !== 1 ? 's' : ''}</p>
+            </div>
+          </div>
+
+          <div className="folder-grid">
+            {filteredFolders.map((folder) => (
+              <div key={folder.id} className="folder-card">
+                <button type="button" className="folder-card-main" onClick={() => navigate(folder)}>
+                  <div className="folder-avatar" style={{ background: getColor(folder.name) }}>
+                    {getFolderIcon(folder.name)}
+                  </div>
+                  <div>
+                    <div className="folder-title">{folder.name}</div>
+                    <div className="folder-meta">Folder ∑ {new Date(folder.created_at).toLocaleDateString()}</div>
+                  </div>
+                </button>
+                <button className="icon-button" onClick={() => setConfirmDeleteFolder(folder)} title="Delete folder">
+                  ???
+                </button>
+              </div>
             ))}
           </div>
 
-          {/* Search */}
-          {!isLeaf && (
-            <input
-              type="text" placeholder="Search folders‚Ä¶" value={search}
-              onChange={e => setSearch(e.target.value)}
-              style={{
-                padding: '7px 12px', border: '1px solid #e5e7eb', borderRadius: 8,
-                fontSize: 13, outline: 'none', width: 180, fontFamily: 'inherit'
-              }}
+          <div className="file-section">
+            <FileList
+              files={files}
+              onDeleted={loadCurrentFolder}
+              onUpload={() => setShowUpload(true)}
             />
+          </div>
+
+          {loading && (
+            <div className="loading-overlay">
+              <div>LoadingÖ</div>
+            </div>
           )}
 
-          {isLeaf && (
-            <button onClick={() => setShowUpload(true)} style={{
-              padding: '7px 16px', background: '#4A90D9', color: '#fff', border: 'none',
-              borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit'
-            }}>
-              + Upload
-            </button>
-          )}
-        </div>
-
-        {/* Content */}
-        <div style={{ flex: 1, overflow: 'auto', padding: '20px' }}>
-          {isLeaf ? (
-            loadingFiles ? (
-              <div style={{ textAlign: 'center', padding: '60px', color: '#9ca3af', fontSize: 14 }}>Loading‚Ä¶</div>
-            ) : (
-              <FileList
-                files={files}
-                onDeleted={loadFiles}
-                onUpload={() => setShowUpload(true)}
-              />
-            )
-          ) : sections ? (
-            sections.map(sec => (
-              <div key={sec.label} style={{ marginBottom: 28 }}>
-                <p style={{
-                  fontSize: 11, fontWeight: 600, color: '#9ca3af', textTransform: 'uppercase',
-                  letterSpacing: '.06em', marginBottom: 10
-                }}>
-                  {sec.label}
-                </p>
-                {renderFolderGrid(sec.children)}
+          {!loading && filteredFolders.length === 0 && files.length === 0 && (
+            <div className="empty-state">
+              <div className="empty-icon">??</div>
+              <p className="empty-title">This folder is empty</p>
+              <p className="empty-copy">Create a new folder or upload your first file.</p>
+              <div className="empty-actions">
+                <button className="action-button primary" onClick={createFolder}>+ New Folder</button>
+                <button className="action-button outline" onClick={() => setShowUpload(true)}>Upload File</button>
               </div>
-            ))
-          ) : (
-            renderFolderGrid(children)
+            </div>
           )}
-        </div>
-      </div>
+        </section>
+      </main>
 
       {showUpload && (
         <UploadModal
-          folderId={currentId}
-          folderName={currentNode?.label || currentId}
+          folderId={currentFolderId}
+          folderName={currentFolder.name}
           userId={user.id}
           onClose={() => setShowUpload(false)}
-          onUploaded={() => { setShowUpload(false); loadFiles() }}
+          onUploaded={() => { setShowUpload(false); loadCurrentFolder() }}
         />
+      )}
+
+      {confirmDeleteFolder && (
+        <div className="modal-backdrop" onClick={() => setConfirmDeleteFolder(null)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <h3>Delete folder?</h3>
+            <p>"{confirmDeleteFolder.name}" and all nested files will be permanently removed.</p>
+            <div className="modal-actions">
+              <button className="action-button outline" onClick={() => setConfirmDeleteFolder(null)}>Cancel</button>
+              <button className="action-button danger" onClick={confirmDelete}>Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {errorMessage && (
+        <div className="toast-error">
+          <span>{errorMessage}</span>
+          <button type="button" onClick={() => setErrorMessage('')} className="toast-close">◊</button>
+        </div>
       )}
     </div>
   )

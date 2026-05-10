@@ -28,7 +28,7 @@ export default function UploadModal({ folderId, folderName, userId, onClose, onU
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i]
-      const path = `${userId}/${folderId}/${Date.now()}_${file.name}`
+      const path = `${userId}/${folderId ?? 'root'}/${Date.now()}_${file.name}`
 
       setProgress(p => ({ ...p, [i]: 'uploading' }))
 
