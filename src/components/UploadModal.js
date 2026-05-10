@@ -26,9 +26,16 @@ export default function UploadModal({ folderId, folderName, userId, onClose, onU
     setError('')
     const uploaded = []
 
+    const targetFolderId = folderId
+    if (!targetFolderId) {
+      setError('Unable to upload: missing folder selection.')
+      setUploading(false)
+      return
+    }
+
     for (let i = 0; i < files.length; i++) {
       const file = files[i]
-      const path = `${userId}/${folderId ?? 'root'}/${Date.now()}_${file.name}`
+      const path = `${userId}/${targetFolderId}/${Date.now()}_${file.name}`
 
       setProgress(p => ({ ...p, [i]: 'uploading' }))
 
